@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.*
+!.env.example
+data/
+sessions/
+cache/
+logs/
+tmp/
+.vscode/
+.idea/
+.DS_Store
