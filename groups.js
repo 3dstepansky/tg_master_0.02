@@ -238,8 +238,8 @@ async function classifyOne(client, uname) {
       linked_chat_username: entity.username ? `@${entity.username}` : null,
       linked_chat_title: entity.title || null,
       linked_chat_members: members,
-          linked_chat_id: Number(chat.id) || null,
-          linked_chat_access_hash: (typeof chat.accessHash !== undefined ? Number(chat.accessHash) : null)
+      linked_chat_id: Number(entity.id) || null,
+      linked_chat_access_hash: (typeof entity.accessHash !== "undefined" ? Number(entity.accessHash) : null)
     };
   }
 

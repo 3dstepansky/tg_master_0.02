@@ -257,6 +257,12 @@ export default function registerParsing(app) {
 
       // Определяем варианты peer
       let variants = [];
+      let used = null;
+      let groupMeta = { title: null, username: null, members_count: null, online_count: null };
+      let sample = [];
+      let sampled_msgs = 0;
+      let methodTrace = [];
+
       if (Number.isFinite(Number(linked_chat_id))) {
         variants = makePeerVariants({ linked_chat_id, linked_chat_access_hash });
       } else if (username) {
@@ -271,12 +277,6 @@ export default function registerParsing(app) {
       } else {
         return err(res, 400, "BAD_REQUEST", "Provide username or linked_chat_id");
       }
-
-      let used = null;
-      let groupMeta = { title: null, username: null, members_count: null, online_count: null };
-      let sample = [];
-      let sampled_msgs = 0;
-      let methodTrace = [];
 
       // Перебираем варианты peer до успеха
       for (const v of variants) {

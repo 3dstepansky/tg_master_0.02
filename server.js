@@ -1,5 +1,5 @@
-import registerParsing from "./services/parsing.js";
-import registerGroups from "./services/groups.js";
+import registerParsing from "./parsing.js";
+import registerGroups from "./groups.js";
 import registerChecker from "./checker.js";
 import registerConverter from "./converter.js";
 import registerAccountManager from "./account_manager.js";
