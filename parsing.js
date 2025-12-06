@@ -388,134 +388,116 @@ export default function registerParsing(app) {
           methodTrace.push(`${used.kind}:participants`);
         }
 
-        // 2) Добираем из history в окно
+        // 2) ДОПОЛНЕНИЕ ИЗ ИСТОРИИ СООБЩЕНИЙ (только для hybrid и history_only режимов)
         let offsetId = 0;
+        let historyBatches = 0;
         const seen = new Set(sample.map(x => x.user_id));
+
         for (;;) {
-          const h = await safeInvoke(() => client.invoke(new Api.messages.GetHistory({ peer: used.peer, limit: Math.min(200, limHistory), offsetId })));
-          if (!h.ok) { methodTrace.push(`${used.kind}:history_fail`); break; }
+          // Проверка таймаута
+          if (Date.now() - t0 > 60_000) {
+            methodTrace.push("history:cutoff60s");
+            break;
+          }
+
+          const h = await safeInvoke(() => client.invoke(new Api.messages.GetHistory({
+            peer: used.peer,
+            limit: Math.min(200, limHistory),
+            offsetId
+          })));
+
+          if (!h.ok) {
+            if (h.flood) {
+              methodTrace.push("history:flood_wait");
+              // Не прерываем полностью, просто останавливаем history
+              break;
+            }
+            methodTrace.push(`${used.kind}:history_fail`);
+            break;
+          }
+
           const msgs = h.value?.messages || [];
-          if (!msgs.length) break;
+          const usersFromResponse = h.value?.users || [];
+          
+          if (!msgs.length) {
+            methodTrace.push("history:end");
+            break;
+          }
+
           sampled_msgs += msgs.length;
+          historyBatches++;
 
+          // Создаём карту пользователей из ответа GetHistory для получения username
+          const usersMap = new Map();
+          for (const u of usersFromResponse) {
+            if (u && u.id) {
+              const userId = String(u.id);
+              usersMap.set(userId, u);
+            }
+          }
+
+          // Обрабатываем сообщения внутри окна времени и извлекаем userId
           let reachedWindow = false;
+          let processedInBatch = 0;
+          
           for (const m of msgs) {
-            const sec = Number(m?.date || 0);
+            // Пропускаем служебные сообщения (без даты)
+            if (!m?.date) continue;
+
+            const sec = Number(m.date);
             const ms = sec ? sec * 1000 : null;
-            if (ms && ms < oldestTs) { reachedWindow = true; break; }
-            const uid = m?.fromId?.userId ?? m?.peerId?.userId ?? null;
-            if (uid != null) {
+            
+            // Проверяем окно времени: если сообщение старше окна, отмечаем это
+            if (ms && ms < oldestTs) {
+              reachedWindow = true;
+              // Продолжаем обработку текущего батча, но после него прервёмся
+              continue; // Пропускаем сообщения вне окна
+            }
+
+            // Извлекаем userId из сообщения
+            const uid = extractUserIdFromMessage(m);
+            if (uid != null && uid !== "0" && uid !== "null" && uid !== "undefined") {
               const k = String(uid);
-              if (!seen.has(k)) { seen.add(k); sample.push({ user_id: k, username: null, is_bot: false }); }
-            }
-<<<<<<< Updated upstream
-=======
-
-            const h = await safeInvoke(() => client.invoke(new Api.messages.GetHistory({
-              peer: used.peer,
-              limit: Math.min(200, limHistory),
-              offsetId
-            })));
-
-            if (!h.ok) {
-              if (h.flood) {
-                methodTrace.push("history:flood_wait");
-                // Не прерываем полностью, просто останавливаем history
-                break;
+              // Проверяем, не бот ли это (используем usersMap для проверки)
+              const userInfo = usersMap.get(k);
+              if (userInfo && userInfo.bot) {
+                continue; // Пропускаем ботов
               }
-              methodTrace.push(`${used.kind}:history_fail`);
-              break;
-            }
-
-            const msgs = h.value?.messages || [];
-            const usersFromResponse = h.value?.users || [];
-            
-            if (!msgs.length) {
-              methodTrace.push("history:end");
-              break;
-            }
-
-            sampled_msgs += msgs.length;
-            historyBatches++;
-
-            // Создаём карту пользователей из ответа GetHistory для получения username
-            const usersMap = new Map();
-            for (const u of usersFromResponse) {
-              if (u && u.id) {
-                const userId = String(u.id);
-                usersMap.set(userId, u);
-              }
-            }
-
-            // Обрабатываем сообщения внутри окна времени и извлекаем userId
-            let reachedWindow = false;
-            let processedInBatch = 0;
-            
-            for (const m of msgs) {
-              // Пропускаем служебные сообщения (без даты)
-              if (!m?.date) continue;
-
-              const sec = Number(m.date);
-              const ms = sec ? sec * 1000 : null;
               
-              // Проверяем окно времени: если сообщение старше окна, отмечаем это
-              if (ms && ms < oldestTs) {
-                reachedWindow = true;
-                // Продолжаем обработку текущего батча, но после него прервёмся
-                continue; // Пропускаем сообщения вне окна
-              }
-
-              // Извлекаем userId из сообщения
-              const uid = extractUserIdFromMessage(m);
-              if (uid != null && uid !== "0" && uid !== "null" && uid !== "undefined") {
-                const k = String(uid);
-                // Проверяем, не бот ли это (используем usersMap для проверки)
-                const userInfo = usersMap.get(k);
-                if (userInfo && userInfo.bot) {
-                  continue; // Пропускаем ботов
-                }
-                
-                if (!seen.has(k)) {
-                  seen.add(k);
-                  sample.push({
-                    user_id: k,
-                    username: userInfo?.username ? `@${userInfo.username}` : null,
-                    is_bot: false
-                  });
-                  processedInBatch++;
-                }
+              if (!seen.has(k)) {
+                seen.add(k);
+                sample.push({
+                  user_id: k,
+                  username: userInfo?.username ? `@${userInfo.username}` : null,
+                  is_bot: false
+                });
+                processedInBatch++;
               }
             }
-
-            // Если достигли окна времени, прерываем дальнейшую пагинацию
-            if (reachedWindow) {
-              methodTrace.push("history:window_reached");
-              break;
-            }
-
-            // Если в батче не было обработано ни одного пользователя, но сообщения есть - возможно проблема с извлечением
-            if (processedInBatch === 0 && msgs.length > 0) {
-              methodTrace.push("history:no_users_extracted");
-            }
-
-            offsetId = msgs[msgs.length - 1]?.id || 0;
-            if (!offsetId) {
-              methodTrace.push("history:end");
-              break;
-            }
-
-            await sleep(jitter(BASE_DELAY));
           }
 
-          if (historyBatches > 0) {
-            methodTrace.push(`history:${historyBatches}_batches`);
->>>>>>> Stashed changes
+          // Если достигли окна времени, прерываем дальнейшую пагинацию
+          if (reachedWindow) {
+            methodTrace.push("history:window_reached");
+            break;
           }
-          if (reachedWindow) break;
+
+          // Если в батче не было обработано ни одного пользователя, но сообщения есть - возможно проблема с извлечением
+          if (processedInBatch === 0 && msgs.length > 0) {
+            methodTrace.push("history:no_users_extracted");
+          }
+
           offsetId = msgs[msgs.length - 1]?.id || 0;
-          if (!offsetId) break;
-          if (Date.now() - t0 > 60_000) { methodTrace.push("cutoff60s"); break; }
+          if (!offsetId) {
+            methodTrace.push("history:end");
+            break;
+          }
+
           await sleep(jitter(BASE_DELAY));
+        }
+
+        if (historyBatches > 0) {
+          methodTrace.push(`history:${historyBatches}_batches`);
         }
 
         // если уже что-то нашли — выходим из цикла вариантов
