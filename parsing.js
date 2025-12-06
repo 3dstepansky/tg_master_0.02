@@ -310,17 +310,19 @@ export default function registerParsing(app) {
     } finally { try { await client?.disconnect(); } catch {} }
   });
 
-  // POST /v1/parsing/members/sample — двойной пробой peer (channel/chat)
+  // POST /v1/parsing/members/sample — полный парсинг участников с пагинацией, затем история
   router.post("/members/sample", async (req, res) => {
     if (!ensureAuth(req, res)) return;
     const t0 = Date.now();
-    const { session_name, session_string, api_id, api_hash, username, linked_chat_id, linked_chat_access_hash, limits, window_days } = req.body || {};
+    const { session_name, session_string, api_id, api_hash, username, linked_chat_id, linked_chat_access_hash, limits, window_days, max_participants, parse_mode } = req.body || {};
     if (!api_id || !api_hash) return err(res, 400, "BAD_REQUEST", "api_id and api_hash are required");
 
     const limHistory = Math.max(1, Math.min(1000, Number(limits?.history ?? 200)));
-    const limParticipants = Math.max(1, Math.min(200, Number(limits?.participants ?? 100)));
+    const limParticipantsPerBatch = Math.max(1, Math.min(200, Number(limits?.participants ?? 200)));
+    const maxParticipantsTotal = Number.isFinite(Number(max_participants)) ? Math.max(0, Number(max_participants)) : null; // null = без ограничения
     const wndDays = Math.max(1, Math.min(365, Number(window_days ?? 30)));
     const oldestTs = Date.now() - wndDays * 24 * 3600 * 1000;
+    const mode = parse_mode === "participants_only" ? "participants_only" : parse_mode === "history_only" ? "history_only" : "hybrid";
 
     let client;
     try {
@@ -333,6 +335,8 @@ export default function registerParsing(app) {
       let sample = [];
       let sampled_msgs = 0;
       let methodTrace = [];
+      let participants_count = 0;
+      let participants_batches = 0;
 
       if (Number.isFinite(Number(linked_chat_id))) {
         variants = makePeerVariants({ linked_chat_id, linked_chat_access_hash });
@@ -379,21 +383,107 @@ export default function registerParsing(app) {
         await joinIfNeeded(client, used.peer).catch(() => {});
         methodTrace.push("joinIfNeeded");
 
-        // 1) Пробуем participants
-        const part = await safeInvoke(() => client.invoke(new Api.channels.GetParticipants({
-          channel: used.peer, filter: new Api.ChannelParticipantsRecent(), offset: 0, limit: Math.min(200, limParticipants), hash: 0
-        })));
-        if (part.ok && Array.isArray(part.value?.users) && part.value.users.length) {
-          sample.push(...part.value.users.map(u => ({ user_id: String(u.id), username: u?.username ? `@${u.username}` : null, is_bot: !!u?.bot })));
-          methodTrace.push(`${used.kind}:participants`);
+        const seen = new Set();
+        // Сбрасываем счётчики для каждого варианта peer
+        participants_count = 0;
+        participants_batches = 0;
+
+        // 1) ПОЛНЫЙ ПАРСИНГ УЧАСТНИКОВ С ПАГИНАЦИЕЙ (где возможно)
+        if (mode !== "history_only") {
+          let participantsOffset = 0;
+          let participantsHash = 0;
+          let participantsDone = false;
+
+          while (!participantsDone) {
+            // Проверка лимита общего количества участников
+            if (maxParticipantsTotal !== null && participants_count >= maxParticipantsTotal) {
+              methodTrace.push("participants:limit_reached");
+              break;
+            }
+
+            // Проверка таймаута
+            if (Date.now() - t0 > 60_000) {
+              methodTrace.push("participants:cutoff60s");
+              break;
+            }
+
+            const part = await safeInvoke(() => client.invoke(new Api.channels.GetParticipants({
+              channel: used.peer,
+              filter: new Api.ChannelParticipantsRecent(),
+              offset: participantsOffset,
+              limit: limParticipantsPerBatch,
+              hash: participantsHash
+            })));
+
+            if (!part.ok) {
+              if (part.flood) {
+                methodTrace.push("participants:flood_wait");
+                return err(res, 429, "FLOOD_WAIT", "Too many requests", { wait_seconds: part.wait_seconds });
+              }
+              methodTrace.push(`${used.kind}:participants_fail`);
+              break;
+            }
+
+            const usersMap = new Map();
+            for (const u of (part.value?.users || [])) {
+              usersMap.set(String(u.id), u);
+            }
+
+            const participants = part.value?.participants || [];
+            if (participants.length === 0) {
+              participantsDone = true;
+              methodTrace.push("participants:end");
+              break;
+            }
+
+            const batch = participants.map(p => {
+              const u = usersMap.get(String(p.userId));
+              return {
+                user_id: String(p.userId),
+                username: u?.username ? `@${u.username}` : null,
+                is_bot: !!u?.bot
+              };
+            });
+
+            // Добавляем только новых участников
+            for (const item of batch) {
+              if (!seen.has(item.user_id)) {
+                seen.add(item.user_id);
+                sample.push(item);
+                participants_count++;
+              }
+            }
+
+            participants_batches++;
+            participantsOffset += batch.length;
+
+            // Если получили меньше, чем запрашивали — достигли конца
+            if (batch.length < limParticipantsPerBatch) {
+              participantsDone = true;
+              methodTrace.push("participants:end");
+              break;
+            }
+
+            // Проверка лимита общего количества участников после батча
+            if (maxParticipantsTotal !== null && participants_count >= maxParticipantsTotal) {
+              methodTrace.push("participants:limit_reached");
+              break;
+            }
+
+            await sleep(jitter(BASE_DELAY));
+          }
+
+          if (participants_count > 0) {
+            methodTrace.push(`participants:${participants_count}_in_${participants_batches}_batches`);
+          }
         }
 
         // 2) ДОПОЛНЕНИЕ ИЗ ИСТОРИИ СООБЩЕНИЙ (только для hybrid и history_only режимов)
-        let offsetId = 0;
-        let historyBatches = 0;
-        const seen = new Set(sample.map(x => x.user_id));
+        if (mode !== "participants_only") {
+          let offsetId = 0;
+          let historyBatches = 0;
 
-        for (;;) {
+          for (;;) {
           // Проверка таймаута
           if (Date.now() - t0 > 60_000) {
             methodTrace.push("history:cutoff60s");
@@ -441,22 +531,19 @@ export default function registerParsing(app) {
           let processedInBatch = 0;
           
           for (const m of msgs) {
-            // Пропускаем служебные сообщения (без даты)
-            if (!m?.date) continue;
-
-            const sec = Number(m.date);
+            const sec = Number(m?.date || 0);
             const ms = sec ? sec * 1000 : null;
             
             // Проверяем окно времени: если сообщение старше окна, отмечаем это
             if (ms && ms < oldestTs) {
               reachedWindow = true;
               // Продолжаем обработку текущего батча, но после него прервёмся
-              continue; // Пропускаем сообщения вне окна
+              break; // Прерываем обработку батча при достижении окна
             }
 
-            // Извлекаем userId из сообщения
-            const uid = extractUserIdFromMessage(m);
-            if (uid != null && uid !== "0" && uid !== "null" && uid !== "undefined") {
+            // Извлекаем userId из сообщения (простой подход как в старой версии)
+            const uid = m?.fromId?.userId ?? m?.peerId?.userId ?? null;
+            if (uid != null) {
               const k = String(uid);
               // Проверяем, не бот ли это (используем usersMap для проверки)
               const userInfo = usersMap.get(k);
@@ -496,8 +583,9 @@ export default function registerParsing(app) {
           await sleep(jitter(BASE_DELAY));
         }
 
-        if (historyBatches > 0) {
-          methodTrace.push(`history:${historyBatches}_batches`);
+          if (historyBatches > 0) {
+            methodTrace.push(`history:${historyBatches}_batches`);
+          }
         }
 
         // если уже что-то нашли — выходим из цикла вариантов
@@ -505,7 +593,20 @@ export default function registerParsing(app) {
       }
 
       const unique_users = new Set(sample.map(x => x.user_id)).size;
-      return ok(res, { group: groupMeta, sample }, { sampled_msgs, unique_users, window_days: wndDays, method: methodTrace.join(" -> "), took_ms: Date.now() - t0 });
+      // Подсчитываем пользователей из истории (те, у кого username === null и они не были добавлены на этапе participants)
+      const from_history = sample.filter(x => x.username === null).length;
+
+      return ok(res, { group: groupMeta, sample }, {
+        sampled_msgs,
+        unique_users,
+        participants_count,
+        from_history: Math.max(0, from_history),
+        participants_batches,
+        window_days: wndDays,
+        parse_mode: mode,
+        method: methodTrace.join(" -> "),
+        took_ms: Date.now() - t0
+      });
 
     } catch (e) {
       if (e?.__payload) return res.status(e.__http||500).json(e.__payload);
