@@ -117,6 +117,77 @@ async function readMembersCount(client, ent){
 }
 
 /* ------------ linked resolve (как было) ------------ */
+/**
+ * Извлекает userId из сообщения, учитывая различные структуры Telegram API
+ * @param {Object} msg - объект сообщения из Telegram API
+ * @returns {string|null} - userId в виде строки или null
+ */
+function extractUserIdFromMessage(msg) {
+  if (!msg) return null;
+
+  // Прямой доступ к полю from (объект пользователя)
+  if (msg.from) {
+    if (msg.from.id) {
+      return String(msg.from.id);
+    }
+    // Может быть объект User напрямую
+    if (msg.from.className === "User" && msg.from.id) {
+      return String(msg.from.id);
+    }
+  }
+
+  // fromId может быть PeerUser, PeerChannel, PeerChat
+  if (msg.fromId) {
+    // Проверка className для точной идентификации типа
+    if (msg.fromId.className === "PeerUser") {
+      const userId = msg.fromId.userId;
+      if (userId !== undefined && userId !== null) {
+        // Обработка BigInt
+        return String(userId);
+      }
+    }
+    // Прямая проверка userId (без className)
+    if (msg.fromId.userId !== undefined && msg.fromId.userId !== null) {
+      // Проверяем, что это не канал или чат
+      if (msg.fromId.channelId === undefined && msg.fromId.chatId === undefined) {
+        return String(msg.fromId.userId);
+      }
+    }
+  }
+
+  // peerId может быть PeerUser, PeerChannel, PeerChat
+  if (msg.peerId) {
+    // Проверка className для точной идентификации типа
+    if (msg.peerId.className === "PeerUser") {
+      const userId = msg.peerId.userId;
+      if (userId !== undefined && userId !== null) {
+        return String(userId);
+      }
+    }
+    // Прямая проверка userId (без className)
+    if (msg.peerId.userId !== undefined && msg.peerId.userId !== null) {
+      // Проверяем, что это не канал или чат
+      if (msg.peerId.channelId === undefined && msg.peerId.chatId === undefined) {
+        return String(msg.peerId.userId);
+      }
+    }
+  }
+
+  // Альтернативные варианты: проверка через конструктор Api
+  try {
+    if (msg.fromId && Api.PeerUser && msg.fromId instanceof Api.PeerUser) {
+      return String(msg.fromId.userId);
+    }
+    if (msg.peerId && Api.PeerUser && msg.peerId instanceof Api.PeerUser) {
+      return String(msg.peerId.userId);
+    }
+  } catch (e) {
+    // Игнорируем ошибки проверки типа
+  }
+
+  return null;
+}
+
 async function resolveLinkedChat(client, channelEntity){
   // 1) full -> linkedChatId
   const full = await safeInvoke(() => client.invoke(new Api.channels.GetFullChannel({ channel: channelEntity })));
@@ -337,6 +408,108 @@ export default function registerParsing(app) {
               const k = String(uid);
               if (!seen.has(k)) { seen.add(k); sample.push({ user_id: k, username: null, is_bot: false }); }
             }
+<<<<<<< Updated upstream
+=======
+
+            const h = await safeInvoke(() => client.invoke(new Api.messages.GetHistory({
+              peer: used.peer,
+              limit: Math.min(200, limHistory),
+              offsetId
+            })));
+
+            if (!h.ok) {
+              if (h.flood) {
+                methodTrace.push("history:flood_wait");
+                // Не прерываем полностью, просто останавливаем history
+                break;
+              }
+              methodTrace.push(`${used.kind}:history_fail`);
+              break;
+            }
+
+            const msgs = h.value?.messages || [];
+            const usersFromResponse = h.value?.users || [];
+            
+            if (!msgs.length) {
+              methodTrace.push("history:end");
+              break;
+            }
+
+            sampled_msgs += msgs.length;
+            historyBatches++;
+
+            // Создаём карту пользователей из ответа GetHistory для получения username
+            const usersMap = new Map();
+            for (const u of usersFromResponse) {
+              if (u && u.id) {
+                const userId = String(u.id);
+                usersMap.set(userId, u);
+              }
+            }
+
+            // Обрабатываем сообщения внутри окна времени и извлекаем userId
+            let reachedWindow = false;
+            let processedInBatch = 0;
+            
+            for (const m of msgs) {
+              // Пропускаем служебные сообщения (без даты)
+              if (!m?.date) continue;
+
+              const sec = Number(m.date);
+              const ms = sec ? sec * 1000 : null;
+              
+              // Проверяем окно времени: если сообщение старше окна, отмечаем это
+              if (ms && ms < oldestTs) {
+                reachedWindow = true;
+                // Продолжаем обработку текущего батча, но после него прервёмся
+                continue; // Пропускаем сообщения вне окна
+              }
+
+              // Извлекаем userId из сообщения
+              const uid = extractUserIdFromMessage(m);
+              if (uid != null && uid !== "0" && uid !== "null" && uid !== "undefined") {
+                const k = String(uid);
+                // Проверяем, не бот ли это (используем usersMap для проверки)
+                const userInfo = usersMap.get(k);
+                if (userInfo && userInfo.bot) {
+                  continue; // Пропускаем ботов
+                }
+                
+                if (!seen.has(k)) {
+                  seen.add(k);
+                  sample.push({
+                    user_id: k,
+                    username: userInfo?.username ? `@${userInfo.username}` : null,
+                    is_bot: false
+                  });
+                  processedInBatch++;
+                }
+              }
+            }
+
+            // Если достигли окна времени, прерываем дальнейшую пагинацию
+            if (reachedWindow) {
+              methodTrace.push("history:window_reached");
+              break;
+            }
+
+            // Если в батче не было обработано ни одного пользователя, но сообщения есть - возможно проблема с извлечением
+            if (processedInBatch === 0 && msgs.length > 0) {
+              methodTrace.push("history:no_users_extracted");
+            }
+
+            offsetId = msgs[msgs.length - 1]?.id || 0;
+            if (!offsetId) {
+              methodTrace.push("history:end");
+              break;
+            }
+
+            await sleep(jitter(BASE_DELAY));
+          }
+
+          if (historyBatches > 0) {
+            methodTrace.push(`history:${historyBatches}_batches`);
+>>>>>>> Stashed changes
           }
           if (reachedWindow) break;
           offsetId = msgs[msgs.length - 1]?.id || 0;
