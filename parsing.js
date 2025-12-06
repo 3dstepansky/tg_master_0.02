@@ -520,15 +520,29 @@ export default function registerParsing(app) {
           // Создаём карту пользователей из ответа GetHistory для получения username
           const usersMap = new Map();
           for (const u of usersFromResponse) {
-            if (u && u.id) {
+            if (u && u.id && !u.bot) { // Пропускаем ботов сразу
               const userId = String(u.id);
               usersMap.set(userId, u);
             }
           }
 
-          // Обрабатываем сообщения внутри окна времени и извлекаем userId
+          // 1) СНАЧАЛА добавляем всех пользователей из массива users (это более надёжный способ)
+          let usersFromArray = 0;
+          for (const [userId, userInfo] of usersMap) {
+            if (!seen.has(userId)) {
+              seen.add(userId);
+              sample.push({
+                user_id: userId,
+                username: userInfo?.username ? `@${userInfo.username}` : null,
+                is_bot: false
+              });
+              usersFromArray++;
+            }
+          }
+
+          // 2) Затем обрабатываем сообщения внутри окна времени и извлекаем userId из сообщений
           let reachedWindow = false;
-          let processedInBatch = 0;
+          let processedInBatch = 0; // Счётчик пользователей, добавленных из сообщений
           
           for (const m of msgs) {
             const sec = Number(m?.date || 0);
@@ -541,8 +555,30 @@ export default function registerParsing(app) {
               break; // Прерываем обработку батча при достижении окна
             }
 
-            // Извлекаем userId из сообщения (простой подход как в старой версии)
-            const uid = m?.fromId?.userId ?? m?.peerId?.userId ?? null;
+            // Извлекаем userId из сообщения (проверяем различные варианты структуры)
+            let uid = null;
+            
+            // Вариант 1: прямая проверка fromId.userId
+            if (m?.fromId?.userId != null) {
+              uid = m.fromId.userId;
+            }
+            // Вариант 2: проверка через className PeerUser
+            else if (m?.fromId?.className === "PeerUser" && m?.fromId?.userId != null) {
+              uid = m.fromId.userId;
+            }
+            // Вариант 3: проверка peerId.userId
+            else if (m?.peerId?.userId != null) {
+              uid = m.peerId.userId;
+            }
+            // Вариант 4: проверка через className PeerUser в peerId
+            else if (m?.peerId?.className === "PeerUser" && m?.peerId?.userId != null) {
+              uid = m.peerId.userId;
+            }
+            // Вариант 5: проверка from (объект пользователя)
+            else if (m?.from?.id != null) {
+              uid = m.from.id;
+            }
+
             if (uid != null) {
               const k = String(uid);
               // Проверяем, не бот ли это (используем usersMap для проверки)
@@ -570,8 +606,10 @@ export default function registerParsing(app) {
           }
 
           // Если в батче не было обработано ни одного пользователя, но сообщения есть - возможно проблема с извлечением
-          if (processedInBatch === 0 && msgs.length > 0) {
+          if (processedInBatch === 0 && usersFromArray === 0 && msgs.length > 0) {
             methodTrace.push("history:no_users_extracted");
+          } else if (usersFromArray > 0) {
+            methodTrace.push(`history:${usersFromArray}_from_users_array`);
           }
 
           offsetId = msgs[msgs.length - 1]?.id || 0;
