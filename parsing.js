@@ -117,6 +117,77 @@ async function readMembersCount(client, ent){
 }
 
 /* ------------ linked resolve (как было) ------------ */
+/**
+ * Извлекает userId из сообщения, учитывая различные структуры Telegram API
+ * @param {Object} msg - объект сообщения из Telegram API
+ * @returns {string|null} - userId в виде строки или null
+ */
+function extractUserIdFromMessage(msg) {
+  if (!msg) return null;
+
+  // Прямой доступ к полю from (объект пользователя)
+  if (msg.from) {
+    if (msg.from.id) {
+      return String(msg.from.id);
+    }
+    // Может быть объект User напрямую
+    if (msg.from.className === "User" && msg.from.id) {
+      return String(msg.from.id);
+    }
+  }
+
+  // fromId может быть PeerUser, PeerChannel, PeerChat
+  if (msg.fromId) {
+    // Проверка className для точной идентификации типа
+    if (msg.fromId.className === "PeerUser") {
+      const userId = msg.fromId.userId;
+      if (userId !== undefined && userId !== null) {
+        // Обработка BigInt
+        return String(userId);
+      }
+    }
+    // Прямая проверка userId (без className)
+    if (msg.fromId.userId !== undefined && msg.fromId.userId !== null) {
+      // Проверяем, что это не канал или чат
+      if (msg.fromId.channelId === undefined && msg.fromId.chatId === undefined) {
+        return String(msg.fromId.userId);
+      }
+    }
+  }
+
+  // peerId может быть PeerUser, PeerChannel, PeerChat
+  if (msg.peerId) {
+    // Проверка className для точной идентификации типа
+    if (msg.peerId.className === "PeerUser") {
+      const userId = msg.peerId.userId;
+      if (userId !== undefined && userId !== null) {
+        return String(userId);
+      }
+    }
+    // Прямая проверка userId (без className)
+    if (msg.peerId.userId !== undefined && msg.peerId.userId !== null) {
+      // Проверяем, что это не канал или чат
+      if (msg.peerId.channelId === undefined && msg.peerId.chatId === undefined) {
+        return String(msg.peerId.userId);
+      }
+    }
+  }
+
+  // Альтернативные варианты: проверка через конструктор Api
+  try {
+    if (msg.fromId && Api.PeerUser && msg.fromId instanceof Api.PeerUser) {
+      return String(msg.fromId.userId);
+    }
+    if (msg.peerId && Api.PeerUser && msg.peerId instanceof Api.PeerUser) {
+      return String(msg.peerId.userId);
+    }
+  } catch (e) {
+    // Игнорируем ошибки проверки типа
+  }
+
+  return null;
+}
+
 async function resolveLinkedChat(client, channelEntity){
   // 1) full -> linkedChatId
   const full = await safeInvoke(() => client.invoke(new Api.channels.GetFullChannel({ channel: channelEntity })));
@@ -239,17 +310,19 @@ export default function registerParsing(app) {
     } finally { try { await client?.disconnect(); } catch {} }
   });
 
-  // POST /v1/parsing/members/sample — двойной пробой peer (channel/chat)
+  // POST /v1/parsing/members/sample — полный парсинг участников с пагинацией, затем история
   router.post("/members/sample", async (req, res) => {
     if (!ensureAuth(req, res)) return;
     const t0 = Date.now();
-    const { session_name, session_string, api_id, api_hash, username, linked_chat_id, linked_chat_access_hash, limits, window_days } = req.body || {};
+    const { session_name, session_string, api_id, api_hash, username, linked_chat_id, linked_chat_access_hash, limits, window_days, max_participants, parse_mode } = req.body || {};
     if (!api_id || !api_hash) return err(res, 400, "BAD_REQUEST", "api_id and api_hash are required");
 
     const limHistory = Math.max(1, Math.min(1000, Number(limits?.history ?? 200)));
-    const limParticipants = Math.max(1, Math.min(200, Number(limits?.participants ?? 100)));
+    const limParticipantsPerBatch = Math.max(1, Math.min(200, Number(limits?.participants ?? 200)));
+    const maxParticipantsTotal = Number.isFinite(Number(max_participants)) ? Math.max(0, Number(max_participants)) : null; // null = без ограничения
     const wndDays = Math.max(1, Math.min(365, Number(window_days ?? 30)));
     const oldestTs = Date.now() - wndDays * 24 * 3600 * 1000;
+    const mode = parse_mode === "participants_only" ? "participants_only" : parse_mode === "history_only" ? "history_only" : "hybrid";
 
     let client;
     try {
@@ -262,6 +335,8 @@ export default function registerParsing(app) {
       let sample = [];
       let sampled_msgs = 0;
       let methodTrace = [];
+      let participants_count = 0;
+      let participants_batches = 0;
 
       if (Number.isFinite(Number(linked_chat_id))) {
         variants = makePeerVariants({ linked_chat_id, linked_chat_access_hash });
@@ -308,41 +383,247 @@ export default function registerParsing(app) {
         await joinIfNeeded(client, used.peer).catch(() => {});
         methodTrace.push("joinIfNeeded");
 
-        // 1) Пробуем participants
-        const part = await safeInvoke(() => client.invoke(new Api.channels.GetParticipants({
-          channel: used.peer, filter: new Api.ChannelParticipantsRecent(), offset: 0, limit: Math.min(200, limParticipants), hash: 0
-        })));
-        if (part.ok && Array.isArray(part.value?.users) && part.value.users.length) {
-          sample.push(...part.value.users.map(u => ({ user_id: String(u.id), username: u?.username ? `@${u.username}` : null, is_bot: !!u?.bot })));
-          methodTrace.push(`${used.kind}:participants`);
+        const seen = new Set();
+        // Сбрасываем счётчики для каждого варианта peer
+        participants_count = 0;
+        participants_batches = 0;
+
+        // 1) ПОЛНЫЙ ПАРСИНГ УЧАСТНИКОВ С ПАГИНАЦИЕЙ (где возможно)
+        if (mode !== "history_only") {
+          let participantsOffset = 0;
+          let participantsHash = 0;
+          let participantsDone = false;
+
+          while (!participantsDone) {
+            // Проверка лимита общего количества участников
+            if (maxParticipantsTotal !== null && participants_count >= maxParticipantsTotal) {
+              methodTrace.push("participants:limit_reached");
+              break;
+            }
+
+            // Проверка таймаута
+            if (Date.now() - t0 > 60_000) {
+              methodTrace.push("participants:cutoff60s");
+              break;
+            }
+
+            const part = await safeInvoke(() => client.invoke(new Api.channels.GetParticipants({
+              channel: used.peer,
+              filter: new Api.ChannelParticipantsRecent(),
+              offset: participantsOffset,
+              limit: limParticipantsPerBatch,
+              hash: participantsHash
+            })));
+
+            if (!part.ok) {
+              if (part.flood) {
+                methodTrace.push("participants:flood_wait");
+                return err(res, 429, "FLOOD_WAIT", "Too many requests", { wait_seconds: part.wait_seconds });
+              }
+              methodTrace.push(`${used.kind}:participants_fail`);
+              break;
+            }
+
+            const usersMap = new Map();
+            for (const u of (part.value?.users || [])) {
+              usersMap.set(String(u.id), u);
+            }
+
+            const participants = part.value?.participants || [];
+            if (participants.length === 0) {
+              participantsDone = true;
+              methodTrace.push("participants:end");
+              break;
+            }
+
+            const batch = participants.map(p => {
+              const u = usersMap.get(String(p.userId));
+              return {
+                user_id: String(p.userId),
+                username: u?.username ? `@${u.username}` : null,
+                is_bot: !!u?.bot
+              };
+            });
+
+            // Добавляем только новых участников
+            for (const item of batch) {
+              if (!seen.has(item.user_id)) {
+                seen.add(item.user_id);
+                sample.push(item);
+                participants_count++;
+              }
+            }
+
+            participants_batches++;
+            participantsOffset += batch.length;
+
+            // Если получили меньше, чем запрашивали — достигли конца
+            if (batch.length < limParticipantsPerBatch) {
+              participantsDone = true;
+              methodTrace.push("participants:end");
+              break;
+            }
+
+            // Проверка лимита общего количества участников после батча
+            if (maxParticipantsTotal !== null && participants_count >= maxParticipantsTotal) {
+              methodTrace.push("participants:limit_reached");
+              break;
+            }
+
+            await sleep(jitter(BASE_DELAY));
+          }
+
+          if (participants_count > 0) {
+            methodTrace.push(`participants:${participants_count}_in_${participants_batches}_batches`);
+          }
         }
 
-        // 2) Добираем из history в окно
-        let offsetId = 0;
-        const seen = new Set(sample.map(x => x.user_id));
-        for (;;) {
-          const h = await safeInvoke(() => client.invoke(new Api.messages.GetHistory({ peer: used.peer, limit: Math.min(200, limHistory), offsetId })));
-          if (!h.ok) { methodTrace.push(`${used.kind}:history_fail`); break; }
-          const msgs = h.value?.messages || [];
-          if (!msgs.length) break;
-          sampled_msgs += msgs.length;
+        // 2) ДОПОЛНЕНИЕ ИЗ ИСТОРИИ СООБЩЕНИЙ (только для hybrid и history_only режимов)
+        if (mode !== "participants_only") {
+          let offsetId = 0;
+          let historyBatches = 0;
 
+          for (;;) {
+          // Проверка таймаута
+          if (Date.now() - t0 > 60_000) {
+            methodTrace.push("history:cutoff60s");
+            break;
+          }
+
+          const h = await safeInvoke(() => client.invoke(new Api.messages.GetHistory({
+            peer: used.peer,
+            limit: Math.min(200, limHistory),
+            offsetId
+          })));
+
+          if (!h.ok) {
+            if (h.flood) {
+              methodTrace.push("history:flood_wait");
+              // Не прерываем полностью, просто останавливаем history
+              break;
+            }
+            methodTrace.push(`${used.kind}:history_fail`);
+            break;
+          }
+
+          const msgs = h.value?.messages || [];
+          const usersFromResponse = h.value?.users || [];
+          
+          if (!msgs.length) {
+            methodTrace.push("history:end");
+            break;
+          }
+
+          sampled_msgs += msgs.length;
+          historyBatches++;
+
+          // Создаём карту пользователей из ответа GetHistory для получения username
+          const usersMap = new Map();
+          for (const u of usersFromResponse) {
+            if (u && u.id && !u.bot) { // Пропускаем ботов сразу
+              const userId = String(u.id);
+              usersMap.set(userId, u);
+            }
+          }
+
+          // 1) СНАЧАЛА добавляем всех пользователей из массива users (это более надёжный способ)
+          let usersFromArray = 0;
+          for (const [userId, userInfo] of usersMap) {
+            if (!seen.has(userId)) {
+              seen.add(userId);
+              sample.push({
+                user_id: userId,
+                username: userInfo?.username ? `@${userInfo.username}` : null,
+                is_bot: false
+              });
+              usersFromArray++;
+            }
+          }
+
+          // 2) Затем обрабатываем сообщения внутри окна времени и извлекаем userId из сообщений
           let reachedWindow = false;
+          let processedInBatch = 0; // Счётчик пользователей, добавленных из сообщений
+          
           for (const m of msgs) {
             const sec = Number(m?.date || 0);
             const ms = sec ? sec * 1000 : null;
-            if (ms && ms < oldestTs) { reachedWindow = true; break; }
-            const uid = m?.fromId?.userId ?? m?.peerId?.userId ?? null;
+            
+            // Проверяем окно времени: если сообщение старше окна, отмечаем это
+            if (ms && ms < oldestTs) {
+              reachedWindow = true;
+              // Продолжаем обработку текущего батча, но после него прервёмся
+              break; // Прерываем обработку батча при достижении окна
+            }
+
+            // Извлекаем userId из сообщения (проверяем различные варианты структуры)
+            let uid = null;
+            
+            // Вариант 1: прямая проверка fromId.userId
+            if (m?.fromId?.userId != null) {
+              uid = m.fromId.userId;
+            }
+            // Вариант 2: проверка через className PeerUser
+            else if (m?.fromId?.className === "PeerUser" && m?.fromId?.userId != null) {
+              uid = m.fromId.userId;
+            }
+            // Вариант 3: проверка peerId.userId
+            else if (m?.peerId?.userId != null) {
+              uid = m.peerId.userId;
+            }
+            // Вариант 4: проверка через className PeerUser в peerId
+            else if (m?.peerId?.className === "PeerUser" && m?.peerId?.userId != null) {
+              uid = m.peerId.userId;
+            }
+            // Вариант 5: проверка from (объект пользователя)
+            else if (m?.from?.id != null) {
+              uid = m.from.id;
+            }
+
             if (uid != null) {
               const k = String(uid);
-              if (!seen.has(k)) { seen.add(k); sample.push({ user_id: k, username: null, is_bot: false }); }
+              // Проверяем, не бот ли это (используем usersMap для проверки)
+              const userInfo = usersMap.get(k);
+              if (userInfo && userInfo.bot) {
+                continue; // Пропускаем ботов
+              }
+              
+              if (!seen.has(k)) {
+                seen.add(k);
+                sample.push({
+                  user_id: k,
+                  username: userInfo?.username ? `@${userInfo.username}` : null,
+                  is_bot: false
+                });
+                processedInBatch++;
+              }
             }
           }
-          if (reachedWindow) break;
+
+          // Если достигли окна времени, прерываем дальнейшую пагинацию
+          if (reachedWindow) {
+            methodTrace.push("history:window_reached");
+            break;
+          }
+
+          // Если в батче не было обработано ни одного пользователя, но сообщения есть - возможно проблема с извлечением
+          if (processedInBatch === 0 && usersFromArray === 0 && msgs.length > 0) {
+            methodTrace.push("history:no_users_extracted");
+          } else if (usersFromArray > 0) {
+            methodTrace.push(`history:${usersFromArray}_from_users_array`);
+          }
+
           offsetId = msgs[msgs.length - 1]?.id || 0;
-          if (!offsetId) break;
-          if (Date.now() - t0 > 60_000) { methodTrace.push("cutoff60s"); break; }
+          if (!offsetId) {
+            methodTrace.push("history:end");
+            break;
+          }
+
           await sleep(jitter(BASE_DELAY));
+        }
+
+          if (historyBatches > 0) {
+            methodTrace.push(`history:${historyBatches}_batches`);
+          }
         }
 
         // если уже что-то нашли — выходим из цикла вариантов
@@ -350,7 +631,20 @@ export default function registerParsing(app) {
       }
 
       const unique_users = new Set(sample.map(x => x.user_id)).size;
-      return ok(res, { group: groupMeta, sample }, { sampled_msgs, unique_users, window_days: wndDays, method: methodTrace.join(" -> "), took_ms: Date.now() - t0 });
+      // Подсчитываем пользователей из истории (те, у кого username === null и они не были добавлены на этапе participants)
+      const from_history = sample.filter(x => x.username === null).length;
+
+      return ok(res, { group: groupMeta, sample }, {
+        sampled_msgs,
+        unique_users,
+        participants_count,
+        from_history: Math.max(0, from_history),
+        participants_batches,
+        window_days: wndDays,
+        parse_mode: mode,
+        method: methodTrace.join(" -> "),
+        took_ms: Date.now() - t0
+      });
 
     } catch (e) {
       if (e?.__payload) return res.status(e.__http||500).json(e.__payload);
