@@ -264,6 +264,8 @@ export default function registerParsing(app) {
       let sample = [];
       let sampled_msgs = 0;
       let methodTrace = [];
+      let participants_count = 0;
+      let participants_batches = 0;
 
       if (Number.isFinite(Number(linked_chat_id))) {
         variants = makePeerVariants({ linked_chat_id, linked_chat_access_hash });
@@ -311,8 +313,9 @@ export default function registerParsing(app) {
         methodTrace.push("joinIfNeeded");
 
         const seen = new Set();
-        let participants_count = 0;
-        let participants_batches = 0;
+        // Сбрасываем счётчики для каждого варианта peer
+        participants_count = 0;
+        participants_batches = 0;
 
         // 1) ПОЛНЫЙ ПАРСИНГ УЧАСТНИКОВ С ПАГИНАЦИЕЙ (где возможно)
         if (mode !== "history_only") {
