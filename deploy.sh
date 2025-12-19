@@ -35,15 +35,25 @@ if [ ! -d "$PROJECT_DIR" ]; then
     echo "📁 Создаём директорию проекта: $PROJECT_DIR"
     mkdir -p "$PROJECT_DIR"
     cd "$PROJECT_DIR"
-    echo "📥 Клонируем репозиторий..."
-    git clone "$REPO_URL" .
+    echo "📥 Клонируем репозиторий из ветки $BRANCH..."
+    git clone --branch "$BRANCH" "$REPO_URL" . 2>/dev/null || {
+        echo "⚠️  Не удалось клонировать ветку $BRANCH, пробуем клонировать main и переключиться..."
+        git clone "$REPO_URL" .
+        git fetch origin
+        git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH" origin/"$BRANCH" 2>/dev/null || {
+            echo "❌ Не удалось переключиться на ветку $BRANCH"
+            exit 1
+        }
+    }
 else
     echo "📁 Переходим в директорию проекта: $PROJECT_DIR"
     cd "$PROJECT_DIR"
     echo "🔄 Обновляем репозиторий..."
     git fetch origin
-    git checkout "$BRANCH"
-    git pull origin "$BRANCH"
+    git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH" origin/"$BRANCH" 2>/dev/null || {
+        echo "⚠️  Не удалось переключиться на ветку $BRANCH, используем текущую ветку"
+    }
+    git pull origin "$BRANCH" 2>/dev/null || echo "⚠️  Не удалось обновить ветку, продолжаем..."
 fi
 
 # Переходим в директорию с кодом (если репозиторий содержит tg_master_0.02)
@@ -57,7 +67,11 @@ fi
 
 # Проверяем наличие необходимых файлов
 if [ ! -f "Dockerfile" ]; then
-    echo "❌ Dockerfile не найден!"
+    echo "❌ Dockerfile не найден в текущей директории!"
+    echo "📂 Содержимое текущей директории:"
+    ls -la
+    echo ""
+    echo "💡 Убедитесь, что файлы Dockerfile, docker-compose.yml и другие файлы для деплоя закоммичены в ветку $BRANCH"
     exit 1
 fi
 
@@ -74,6 +88,12 @@ if [ ! -f ".env" ]; then
     echo "   ADMIN_TOKEN=your_admin_token_here"
     echo "   API_ID=your_api_id"
     echo "   API_HASH=your_api_hash"
+    echo ""
+    echo "💡 Можно использовать .env.example как шаблон:"
+    if [ -f ".env.example" ]; then
+        echo "   cp .env.example .env"
+        echo "   nano .env"
+    fi
     echo ""
     read -p "Продолжить без .env файла? (y/n) " -n 1 -r
     echo
@@ -117,8 +137,9 @@ if docker ps | grep -q tg-master-api; then
     echo ""
     echo "📝 Полезные команды:"
     echo "   Просмотр логов: docker logs -f tg-master-api"
-    echo "   Остановка: cd $PROJECT_DIR/tg_master_0.02 && $DOCKER_COMPOSE down"
-    echo "   Перезапуск: cd $PROJECT_DIR/tg_master_0.02 && $DOCKER_COMPOSE restart"
+    DEPLOY_DIR=$(pwd)
+    echo "   Остановка: cd $DEPLOY_DIR && $DOCKER_COMPOSE down"
+    echo "   Перезапуск: cd $DEPLOY_DIR && $DOCKER_COMPOSE restart"
     echo "   Обновление: ./deploy.sh $BRANCH"
 else
     echo "❌ Контейнер не запустился. Проверьте логи:"
