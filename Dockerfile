@@ -8,8 +8,8 @@ WORKDIR /app
 COPY package*.json ./
 
 # Устанавливаем зависимости
-# Используем npm ci если есть package-lock.json, иначе npm install
-RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
+# Используем npm install для надёжности (npm ci требует точного соответствия package-lock.json)
+RUN npm install --omit=dev
 
 # Копируем весь код приложения
 COPY . .
