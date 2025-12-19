@@ -14,9 +14,12 @@ services:
       - PORT=${PORT:-8080}
       - ADMIN_TOKEN=${ADMIN_TOKEN}
       
-      # Telegram API credentials
-      - API_ID=${API_ID}
-      - API_HASH=${API_HASH}
+      # Telegram API credentials (опционально, обычно передаются в body от n8n)
+      # Используются только как fallback, если не переданы в запросе
+      - TG_API_ID=${TG_API_ID:-}
+      - TG_API_HASH=${TG_API_HASH:-}
+      - API_ID=${API_ID:-}
+      - API_HASH=${API_HASH:-}
       
       # Опциональные переменные
       - SAFE_BASE_DELAY_MS=${SAFE_BASE_DELAY_MS:-950}

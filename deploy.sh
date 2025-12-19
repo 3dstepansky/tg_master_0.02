@@ -86,8 +86,8 @@ if [ ! -f ".env" ]; then
     echo "📝 Пример .env файла:"
     echo "   PORT=8080"
     echo "   ADMIN_TOKEN=your_admin_token_here"
-    echo "   API_ID=your_api_id"
-    echo "   API_HASH=your_api_hash"
+    echo "   # API_ID и API_HASH обычно передаются из n8n в body запроса"
+    echo "   # Переменные окружения используются только как fallback"
     echo ""
     echo "💡 Можно использовать .env.example как шаблон:"
     if [ -f ".env.example" ]; then

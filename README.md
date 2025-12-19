@@ -73,9 +73,13 @@ POST /v1/groups/summary
 
 ### Обязательные
 - `PORT` - Порт для запуска сервера (по умолчанию: 8080)
-- `ADMIN_TOKEN` - Токен для авторизации API запросов
-- `API_ID` - Telegram API ID
-- `API_HASH` - Telegram API Hash
+- `ADMIN_TOKEN` - Токен для авторизации API запросов (передаётся в заголовке `Authorization: Bearer <token>`)
+
+### Опциональные (обычно передаются из n8n)
+- `API_ID` / `TG_API_ID` - Telegram API ID (обычно передаётся в body каждого запроса из n8n)
+- `API_HASH` / `TG_API_HASH` - Telegram API Hash (обычно передаётся в body каждого запроса из n8n)
+  
+  **Примечание**: Переменные окружения используются только как fallback, если данные не переданы в запросе.
 
 ### Опциональные
 - `SAFE_BASE_DELAY_MS` - Базовая задержка между запросами (по умолчанию: 950ms)

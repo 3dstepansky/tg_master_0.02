@@ -46,8 +46,8 @@ chmod +x deploy.sh
 ```env
 PORT=8080
 ADMIN_TOKEN=your_secure_admin_token_here
-API_ID=your_telegram_api_id
-API_HASH=your_telegram_api_hash
+# API_ID и API_HASH обычно передаются из n8n в body запроса
+# Переменные окружения используются только как fallback
 ```
 
 ## 📝 Команды для управления

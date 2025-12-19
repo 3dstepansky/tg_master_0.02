@@ -53,8 +53,12 @@ nano .env
 # Обязательные
 PORT=8080
 ADMIN_TOKEN=your_secure_admin_token_here
-API_ID=your_telegram_api_id
-API_HASH=your_telegram_api_hash
+
+# Telegram API credentials (опционально)
+# Обычно передаются в каждом запросе из n8n в body
+# Используются только как fallback, если не переданы в запросе
+# API_ID=your_telegram_api_id
+# API_HASH=your_telegram_api_hash
 
 # Опциональные (значения по умолчанию указаны)
 SAFE_BASE_DELAY_MS=950
@@ -138,7 +142,12 @@ curl http://localhost:8080/v1/health
 
 ## 🔒 Безопасность
 
-1. **ADMIN_TOKEN**: Используйте сложный случайный токен
+1. **ADMIN_TOKEN**: Используйте сложный случайный токен (обязательно)
+   - Этот токен используется для авторизации всех API запросов
+   - Передаётся в заголовке `Authorization: Bearer <token>`
+2. **API_ID и API_HASH**: Обычно не нужны в .env
+   - Эти данные передаются в каждом запросе из n8n в body запроса
+   - Переменные окружения используются только как fallback
    ```bash
    openssl rand -hex 32
    ```
