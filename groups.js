@@ -54,14 +54,9 @@ function parsingGroupsNormalizer(req, _res, next) {
 function baseTypeFromEntity(e) {
   if (!e) return null;
   if (e.className === "Channel" || e.className === "ChannelForbidden") {
-    // Приоритет: сначала проверяем megagroup/gigagroup (супергруппы всегда parsable)
     if (e.megagroup || e.gigagroup) return "supergroup";
-    // Если есть broadcast - это канал (нужна проверка linked chat)
     if (e.broadcast) return "channel";
-    // Если Channel без явных флагов - скорее всего это супергруппа (parsable)
-    // В Telegram API все Channel сущности либо супергруппы, либо каналы
-    // Если нет broadcast, то это супергруппа
-    return "supergroup";
+    return "group";
   }
   if (e.className === "Chat" || e.className === "ChatForbidden") return "group";
   return null;
@@ -193,30 +188,12 @@ async function resolveByUsername(client, uname) {
   try {
     dlog("ResolveUsername:", u);
     const r = await safeInvoke(client, new Api.contacts.ResolveUsername({ username: u }));
-    // ResolveUsername может вернуть entity в разных полях: channels, chats, users
-    // Проверяем все возможные варианты
-    const ent = r.channels?.[0] || r.chats?.[0] || r.users?.[0] || null;
-    dlog("ResolveUsername ->", ent?.className || null, ent?.id || null, ent?.username || null, "channels:", r.channels?.length || 0, "chats:", r.chats?.length || 0);
-    if (ent) return ent;
-    // Если entity не найдена в стандартных полях, пробуем найти в других местах
-    dlog("ResolveUsername: entity not in standard fields, trying alternative lookup");
+    const ent = r.channels?.[0] || r.chats?.[0] || null;
+    dlog("ResolveUsername ->", ent?.className || null, ent?.id || null, ent?.username || null);
+    return ent;
   } catch (e) {
     dlog("ResolveUsername error, fallback getEntity:", String(e?.message||e));
-    // Если ResolveUsername упал с ошибкой (не FLOOD_WAIT), пробуем getEntity
-    const msg = String(e?.message || "");
-    if (msg.includes("FLOOD_WAIT")) {
-      // FLOOD_WAIT пробрасываем дальше
-      throw e;
-    }
-  }
-  // Fallback: используем getEntity напрямую
-  try { 
-    const ent = await client.getEntity(uname); 
-    dlog("getEntity ->", ent?.className || null, ent?.id || null, ent?.username || null); 
-    return ent; 
-  } catch (ee) { 
-    dlog("getEntity error:", String(ee?.message||ee)); 
-    return null; 
+    try { const ent = await client.getEntity(uname); dlog("getEntity ->", ent?.className || null, ent?.id || null); return ent; } catch (ee) { dlog("getEntity error:", String(ee?.message||ee)); return null; }
   }
 }
 
@@ -246,39 +223,10 @@ async function connectByBody(req) {
 /* ----------------- core classification ----------------- */
 async function classifyOne(client, uname) {
   dlog("=== classify start:", uname, "===");
-  let entity;
-  try {
-    entity = await resolveByUsername(client, uname);
-  } catch (e) {
-    dlog("resolveByUsername exception:", String(e?.message || e));
-    return { username: uname, parse_state: "NonParsing", error_reason: "RESOLVE_ERROR", error_message: String(e?.message || e) };
-  }
-  if (!entity) { 
-    dlog("no entity -> NonParsing"); 
-    return { username: uname, parse_state: "NonParsing", error_reason: "ENTITY_NOT_FOUND" }; 
-  }
-  let t = baseTypeFromEntity(entity);
-  dlog("entity baseType:", t, "class:", entity.className, "id:", entity.id, "username:", entity.username || null, "megagroup:", entity.megagroup, "gigagroup:", entity.gigagroup, "broadcast:", entity.broadcast);
-
-  // Если baseTypeFromEntity вернул null, но entity найдена - пытаемся определить тип по другим признакам
-  if (!t && entity) {
-    dlog("baseTypeFromEntity returned null, trying alternative type detection");
-    // Если это Channel с мегагруппой - это супергруппа
-    if (entity.megagroup || entity.gigagroup) {
-      t = "supergroup";
-      dlog("detected supergroup by megagroup/gigagroup flags");
-    }
-    // Если это Channel без broadcast - это супергруппа
-    else if (entity.className === "Channel" && !entity.broadcast) {
-      t = "supergroup";
-      dlog("detected supergroup by Channel without broadcast");
-    }
-    // Если это Chat - это группа
-    else if (entity.className === "Chat" || entity.className === "ChatForbidden") {
-      t = "group";
-      dlog("detected group by className");
-    }
-  }
+  const entity = await resolveByUsername(client, uname);
+  if (!entity) { dlog("no entity -> NonParsing"); return { username: uname, parse_state: "NonParsing" }; }
+  const t = baseTypeFromEntity(entity);
+  dlog("entity baseType:", t, "class:", entity.className, "id:", entity.id, "username:", entity.username || null);
 
   // groups/supergroups — parsable сами по себе
   if (t === "group" || t === "supergroup") {
@@ -297,32 +245,12 @@ async function classifyOne(client, uname) {
 
   // channel — join -> GetFullChannel(+full.chats) -> (если надо) DiscussionMessage
   if (t === "channel") {
-    try {
-      await joinIfNeeded(client, entity);
-    } catch (e) {
-      dlog("joinIfNeeded error (non-fatal):", String(e?.message || e));
-      // Продолжаем даже если join не удался (может быть уже участник или приватный)
-    }
+    await joinIfNeeded(client, entity);
 
-    let info1 = null;
-    try {
-      info1 = await getLinkedChatInfo(client, entity);
-    } catch (e) {
-      dlog("getLinkedChatInfo error:", String(e?.message || e));
-      // Продолжаем проверку discussion даже если getLinkedChatInfo упал
-    }
-    if (info1) { 
-      dlog("channel linked -> parsable", info1); 
-      return { username: uname, parse_state: "parsable", ...info1 }; 
-    }
+    const info1 = await getLinkedChatInfo(client, entity);
+    if (info1) { dlog("channel linked -> parsable", info1); return { username: uname, parse_state: "parsable", ...info1 }; }
 
-    let hasDiscuss = false;
-    try {
-      hasDiscuss = await hasDiscussionByHistory(client, entity);
-    } catch (e) {
-      dlog("hasDiscussionByHistory error:", String(e?.message || e));
-      // Если проверка discussion упала, считаем что discussion нет
-    }
+    const hasDiscuss = await hasDiscussionByHistory(client, entity);
     if (hasDiscuss) {
       dlog("history shows discussions -> parsable (no linked id)");
       return { username: uname, parse_state: "parsable", linked_chat_username: null, linked_chat_title: null, linked_chat_members: null,
@@ -332,11 +260,11 @@ async function classifyOne(client, uname) {
     }
 
     dlog("channel -> NonParsing (no linked, no discussion)");
-    return { username: uname, parse_state: "NonParsing", error_reason: "NO_LINKED_CHAT_OR_DISCUSSION" };
+    return { username: uname, parse_state: "NonParsing" };
   }
 
-  dlog("unknown type -> NonParsing", "className:", entity?.className, "baseType:", t);
-  return { username: uname, parse_state: "NonParsing", error_reason: "UNKNOWN_TYPE", entity_className: entity?.className || null };
+  dlog("unknown type -> NonParsing");
+  return { username: uname, parse_state: "NonParsing" };
 }
 
 /* ----------------- register routes ----------------- */
