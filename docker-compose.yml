@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  tg-master:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tg-master-api
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      # Обязательные переменные
+      - PORT=${PORT:-8080}
+      - ADMIN_TOKEN=${ADMIN_TOKEN}
+      
+      # Telegram API credentials
+      - API_ID=${API_ID}
+      - API_HASH=${API_HASH}
+      
+      # Опциональные переменные
+      - SAFE_BASE_DELAY_MS=${SAFE_BASE_DELAY_MS:-950}
+      - CHECKER_MIN_INTERVAL_MS=${CHECKER_MIN_INTERVAL_MS:-1000}
+      - CHECKER_MAX_INTERVAL_MS=${CHECKER_MAX_INTERVAL_MS:-5000}
+      - CHECKER_MAX_PER_MIN=${CHECKER_MAX_PER_MIN:-30}
+      - DEBUG_GROUPS=${DEBUG_GROUPS:-0}
+      - STANDALONE_GROUPS=${STANDALONE_GROUPS:-0}
+    volumes:
+      # Персистентное хранение сессий Telegram
+      - ./data:/app/data
+    networks:
+      - tg-master-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:${PORT:-8080}/v1/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  tg-master-network:
+    driver: bridge
+

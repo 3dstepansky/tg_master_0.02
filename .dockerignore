@@ -1,0 +1,36 @@
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Документация (не нужна в контейнере)
+docs/
+*.md
+!README_DEPLOY.md
+
+# IDE и конфигурация
+.cursor/
+.cursorrules
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Локальные данные (будут созданы в контейнере)
+data/
+sessions/
+
+# Переменные окружения (должны передаваться через docker-compose)
+.env
+.env.local
+
+# Временные файлы
+*.log
+tmp/
+temp/
+
