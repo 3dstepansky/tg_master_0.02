@@ -1,0 +1,49 @@
+# @file: docker-compose.yml
+# @description: Оркестрация tg-master API с volume для сессий и переменными окружения.
+# @dependencies: Docker, docker-compose
+# @created: 2025-12-20
+
+# Docker Compose конфигурация для деплоя tg-master API
+# Настраивает контейнер с volume для сессий и переменными окружения
+version: '3.8'
+
+services:
+  tg-master:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tg-master-api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # Volume для хранения сессий Telegram (сохраняется между перезапусками)
+      - ./data:/app/data
+    environment:
+      # Порт сервера (можно изменить)
+      - PORT=8080
+      
+      # Токен администратора (ОБЯЗАТЕЛЬНО установить!)
+      # Если не установлен, авторизация отключена (небезопасно для production)
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-REPLACE_ME_STRONG}
+      
+      # Telegram API credentials (опционально, обычно передаются в body от n8n)
+      # Используются как fallback, если не переданы в запросе
+      - TG_API_ID=${TG_API_ID:-}
+      - TG_API_HASH=${TG_API_HASH:-}
+      
+      # Базовая задержка для безопасных запросов (мс)
+      - SAFE_BASE_DELAY_MS=${SAFE_BASE_DELAY_MS:-1200}
+      
+      # Режим отладки для модуля groups (0 или 1)
+      - DEBUG_GROUPS=${DEBUG_GROUPS:-0}
+      
+      # Директория для данных
+      - DATA_DIR=/app/data
+    networks:
+      - tg-master-network
+
+networks:
+  tg-master-network:
+    driver: bridge
+
