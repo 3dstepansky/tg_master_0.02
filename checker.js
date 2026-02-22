@@ -10,7 +10,7 @@ function isAuth(req) {
   return process.env.ADMIN_TOKEN ? token === process.env.ADMIN_TOKEN : true;
 }
 function guard(req, res, next) {
-  if (!isAuth(req)) return res.status(401).json({ success:false, data:null, meta:null, error:{ code:'UNAUTHORIZED', message:'Missing or invalid ADMIN_TOKEN', details:null }});
+  if (!isAuth(req)) return res.status(401).json({ success: false, data: null, meta: null, error: { code: 'UNAUTHORIZED', message: 'Missing or invalid ADMIN_TOKEN', details: null } });
   next();
 }
 
@@ -38,8 +38,8 @@ async function makeClient({ sessionName, apiId, apiHash }) {
 const RL = new Map();
 // env tuning
 const BASE_MIN_INTERVAL = Math.max(200, Number(process.env.CHECKER_MIN_INTERVAL_MS ?? 1100)); // 1.1s по умолчанию
-const MAX_MIN_INTERVAL  = Math.max(BASE_MIN_INTERVAL, Number(process.env.CHECKER_MAX_INTERVAL_MS ?? 30000)); // до 30с
-const MAX_PER_MIN       = Math.max(1, Number(process.env.CHECKER_MAX_PER_MIN ?? 45)); // «мягкий» кап за минуту
+const MAX_MIN_INTERVAL = Math.max(BASE_MIN_INTERVAL, Number(process.env.CHECKER_MAX_INTERVAL_MS ?? 30000)); // до 30с
+const MAX_PER_MIN = Math.max(1, Number(process.env.CHECKER_MAX_PER_MIN ?? 45)); // «мягкий» кап за минуту
 
 function getBucket(session) {
   const b = RL.get(session) ?? { nextAt: 0, minInterval: BASE_MIN_INTERVAL, wins: 0, winStarted: 0 };
@@ -143,12 +143,12 @@ async function resolveByUserId(client, user_id, access_hash) {
   return normalizeUser(userObj, full);
 }
 async function resolveByPhone(client, phone) {
-  const contacts = [ new Api.InputPhoneContact({ clientId: BigInt(Date.now()), phone: String(phone), firstName: 'x', lastName: 'x' }) ];
+  const contacts = [new Api.InputPhoneContact({ clientId: BigInt(Date.now()), phone: String(phone), firstName: 'x', lastName: 'x' })];
   const imp = await client.invoke(new Api.contacts.ImportContacts({ contacts }));
   const u = (imp.users && imp.users[0]) ? imp.users[0] : null;
   if (!u) return null;
   const full = await client.invoke(new Api.users.GetFullUser({ id: u }));
-  try { await client.invoke(new Api.contacts.DeleteByPhones({ phones: [String(phone)] })); } catch {}
+  try { await client.invoke(new Api.contacts.DeleteByPhones({ phones: [String(phone)] })); } catch { }
   return normalizeUser(u, full);
 }
 async function resolveOne(client, payload) {
@@ -180,32 +180,35 @@ export default function registerChecker(app) {
     const t0 = Date.now();
     const body = req.body || {};
     const session = body.session_name;
+    let client = null;
     try {
       const { session_name, api_id, api_hash, username, user_id, access_hash, phone } = body;
-      if (!session_name) return res.status(400).json({ success:false, data:null, meta:null, error:{ code:'BAD_REQUEST', message:'session_name is required', details:null }});
+      if (!session_name) return res.status(400).json({ success: false, data: null, meta: null, error: { code: 'BAD_REQUEST', message: 'session_name is required', details: null } });
       const id = api_id || process.env.TG_API_ID || process.env.API_ID || process.env.TELEGRAM_API_ID;
       const hash = api_hash || process.env.TG_API_HASH || process.env.API_HASH || process.env.TELEGRAM_API_HASH;
-      if (!id || !hash) return res.status(400).json({ success:false, data:null, meta:null, error:{ code:'BAD_REQUEST', message:'api_id and api_hash are required', details:null }});
+      if (!id || !hash) return res.status(400).json({ success: false, data: null, meta: null, error: { code: 'BAD_REQUEST', message: 'api_id and api_hash are required', details: null } });
 
       // анти-флуд перед вызовом
       await acquirePermit(session_name);
 
-      const client = await makeClient({ sessionName: session_name, apiId: id, apiHash: hash });
+      client = await makeClient({ sessionName: session_name, apiId: id, apiHash: hash });
       const item = await resolveOne(client, { username, user_id, access_hash, phone });
       softenAfterSuccess(session_name);
-      return res.json({ success:true, data:{ item }, meta:{ took_ms: Date.now()-t0, rate_limit:{ min_interval_ms: getBucket(session_name).minInterval } }, error:null });
+      return res.json({ success: true, data: { item }, meta: { took_ms: Date.now() - t0, rate_limit: { min_interval_ms: getBucket(session_name).minInterval } }, error: null });
     } catch (e) {
       const msg = String(e?.message || e);
       const waitSec = parseFlood(msg);
       const isFlood = (/FLOOD_WAIT/i.test(msg) || waitSec !== null);
       if (isFlood) backoffOnFlood(session, waitSec);
       const code = isFlood ? 'FLOOD_WAIT'
-                 : /NOT_FOUND_BY_PHONE/.test(msg) ? 'NOT_FOUND'
-                 : /USER_NOT_FOUND_OR_HASH_REQUIRED/.test(msg) ? 'BAD_REQUEST'
-                 : /BAD_REQUEST/.test(msg) ? 'BAD_REQUEST'
-                 : 'INTERNAL';
+        : /NOT_FOUND_BY_PHONE/.test(msg) ? 'NOT_FOUND'
+          : /USER_NOT_FOUND_OR_HASH_REQUIRED/.test(msg) ? 'BAD_REQUEST'
+            : /BAD_REQUEST/.test(msg) ? 'BAD_REQUEST'
+              : 'INTERNAL';
       const http = code === 'FLOOD_WAIT' ? 429 : code === 'BAD_REQUEST' ? 400 : code === 'NOT_FOUND' ? 404 : 500;
-      return res.status(http).json({ success:false, data:null, meta:{ rate_limit:{ min_interval_ms: getBucket(session||body.session_name||'').minInterval } }, error:{ code, message: msg, details: (waitSec!==null ? { wait_seconds: waitSec } : null) }});
+      return res.status(http).json({ success: false, data: null, meta: { rate_limit: { min_interval_ms: getBucket(session || body.session_name || '').minInterval } }, error: { code, message: msg, details: (waitSec !== null ? { wait_seconds: waitSec } : null) } });
+    } finally {
+      if (client) try { await client.disconnect(); } catch { }
     }
   });
 
@@ -214,13 +217,14 @@ export default function registerChecker(app) {
     const t0 = Date.now();
     const body = req.body || {};
     const session = body.session_name;
+    let client = null;
     try {
       const { session_name, api_id, api_hash, items, batch_size = 100, pause_ms = 300 } = body;
-      if (!session_name) return res.status(400).json({ success:false, data:null, meta:null, error:{ code:'BAD_REQUEST', message:'session_name is required', details:null }});
-      if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ success:false, data:null, meta:null, error:{ code:'BAD_REQUEST', message:'items[] required', details:null }});
+      if (!session_name) return res.status(400).json({ success: false, data: null, meta: null, error: { code: 'BAD_REQUEST', message: 'session_name is required', details: null } });
+      if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ success: false, data: null, meta: null, error: { code: 'BAD_REQUEST', message: 'items[] required', details: null } });
       const id = api_id || process.env.TG_API_ID || process.env.API_ID || process.env.TELEGRAM_API_ID;
       const hash = api_hash || process.env.TG_API_HASH || process.env.API_HASH || process.env.TELEGRAM_API_HASH;
-      const client = await makeClient({ sessionName: session_name, apiId: id, apiHash: hash });
+      client = await makeClient({ sessionName: session_name, apiId: id, apiHash: hash });
 
       const out = [];
       let ok = 0, failed = 0;
@@ -236,17 +240,17 @@ export default function registerChecker(app) {
             await acquirePermit(session_name);
             const r = await resolveOne(client, it);
             softenAfterSuccess(session_name);
-            out.push({ success:true, item: r, error:null });
+            out.push({ success: true, item: r, error: null });
             ok++;
           } catch (e) {
             const msg = String(e?.message || e);
             const waitSec = parseFlood(msg);
             const isFlood = (/FLOOD_WAIT/i.test(msg) || waitSec !== null);
             const code = isFlood ? 'FLOOD_WAIT'
-                       : /NOT_FOUND_BY_PHONE/.test(msg) ? 'NOT_FOUND'
-                       : /USER_NOT_FOUND_OR_HASH_REQUIRED/.test(msg) ? 'BAD_REQUEST'
-                       : 'INTERNAL';
-            out.push({ success:false, item:null, error:{ code, message: msg, details: (waitSec!==null ? { wait_seconds: waitSec } : null) }});
+              : /NOT_FOUND_BY_PHONE/.test(msg) ? 'NOT_FOUND'
+                : /USER_NOT_FOUND_OR_HASH_REQUIRED/.test(msg) ? 'BAD_REQUEST'
+                  : 'INTERNAL';
+            out.push({ success: false, item: null, error: { code, message: msg, details: (waitSec !== null ? { wait_seconds: waitSec } : null) } });
             failed++;
             if (isFlood) { backoffOnFlood(session_name, waitSec); floodWait = waitSec ?? 60; break outer; }
           }
@@ -260,7 +264,7 @@ export default function registerChecker(app) {
         meta: {
           total: items.length,
           ok, failed,
-          took_ms: Date.now()-t0,
+          took_ms: Date.now() - t0,
           flood_wait: floodWait ? { wait_seconds: floodWait } : null,
           rate_limit: { min_interval_ms: getBucket(session_name).minInterval, max_per_min: MAX_PER_MIN }
         },
@@ -273,7 +277,9 @@ export default function registerChecker(app) {
       if (isFlood) backoffOnFlood(session, waitSec);
       const code = isFlood ? 'FLOOD_WAIT' : 'INTERNAL';
       const http = code === 'FLOOD_WAIT' ? 429 : 500;
-      return res.status(http).json({ success:false, data:null, meta:{ rate_limit:{ min_interval_ms: getBucket(session||body.session_name||'').minInterval, max_per_min: MAX_PER_MIN } }, error:{ code, message: msg, details: (waitSec!==null ? { wait_seconds: waitSec } : null) }});
+      return res.status(http).json({ success: false, data: null, meta: { rate_limit: { min_interval_ms: getBucket(session || body.session_name || '').minInterval, max_per_min: MAX_PER_MIN } }, error: { code, message: msg, details: (waitSec !== null ? { wait_seconds: waitSec } : null) } });
+    } finally {
+      if (client) try { await client.disconnect(); } catch { }
     }
   });
 

@@ -17,7 +17,7 @@ function ok(res, data = null, meta = null) { res.status(200).json({ success: tru
 function err(res, http = 500, code = "INTERNAL", message = "Internal error", details = null) { res.status(http).json({ success: false, data: null, meta: null, error: { code, message, details } }); }
 function isAuth(req) { const h = req.headers["authorization"] || ""; const token = h.startsWith("Bearer ") ? h.slice(7) : h; return process.env.ADMIN_TOKEN ? token === process.env.ADMIN_TOKEN : true; }
 function guard(req, res, next) { if (!isAuth(req)) return err(res, 401, "UNAUTHORIZED", "Missing or invalid ADMIN_TOKEN"); next(); }
-function validName(name) { return /^[a-zA-Z0-9._-]{1,64}$/.test(String(name||"")); }
+function validName(name) { return /^[a-zA-Z0-9._-]{1,64}$/.test(String(name || "")); }
 
 // challenges for login flow
 const challenges = new Map();
@@ -106,13 +106,14 @@ export default function registerAccountManager(app) {
 
   // --- verify code (may require 2FA)
   router.post("/login/verify_code", guard, async (req, res) => {
+    let client = null;
     try {
       const { challenge_id, code, session_name } = req.body || {};
       if (!challenge_id || !code) return err(res, 400, "BAD_REQUEST", "challenge_id and code are required");
       const ch = challenges.get(challenge_id);
       if (!ch) return err(res, 404, "NOT_FOUND", "challenge not found or expired");
 
-      const client = new TelegramClient(new StringSession(ch.tmpSession), ch.api_id, ch.api_hash, { connectionRetries: 5 });
+      client = new TelegramClient(new StringSession(ch.tmpSession), ch.api_id, ch.api_hash, { connectionRetries: 5 });
       await client.connect();
       try {
         await client.invoke(new Api.auth.SignIn({
@@ -135,17 +136,19 @@ export default function registerAccountManager(app) {
       challenges.delete(challenge_id);
       ok(res, { session_name: name, session_string: sessionString });
     } catch (e) { err(res, 500, "INTERNAL", String(e)); }
+    finally { if (client) try { await client.disconnect(); } catch { } }
   });
 
   // --- verify 2FA password (SRP)
   router.post("/login/verify_password", guard, async (req, res) => {
+    let client = null;
     try {
       const { challenge_id, password, session_name } = req.body || {};
       if (!challenge_id || !password) return err(res, 400, "BAD_REQUEST", "challenge_id and password are required");
       const ch = challenges.get(challenge_id);
       if (!ch) return err(res, 404, "NOT_FOUND", "challenge not found or expired");
 
-      const client = new TelegramClient(new StringSession(ch.tmpSession), ch.api_id, ch.api_hash, { connectionRetries: 5 });
+      client = new TelegramClient(new StringSession(ch.tmpSession), ch.api_id, ch.api_hash, { connectionRetries: 5 });
       await client.connect();
 
       // SRP flow
@@ -165,27 +168,27 @@ export default function registerAccountManager(app) {
         return err(res, 400, "BAD_REQUEST", "Invalid 2FA password");
       }
       err(res, 500, "INTERNAL", msg);
-    }
+    } finally { if (client) try { await client.disconnect(); } catch { } }
   });
 
   // --- check one session
   router.post("/session/check", guard, async (req, res) => {
+    let client = null;
     try {
       const { session_name, api_id, api_hash } = req.body || {};
       if (!session_name || !api_id || !api_hash) return err(res, 400, "BAD_REQUEST", "session_name, api_id, api_hash are required");
       await ensureDirs();
       const raw = JSON.parse(await fs.readFile(path.join(SESS_DIR, session_name + ".json"), "utf8"));
-      const client = new TelegramClient(new StringSession(raw.session_string), Number(api_id), String(api_hash), { connectionRetries: 1 });
+      client = new TelegramClient(new StringSession(raw.session_string), Number(api_id), String(api_hash), { connectionRetries: 1 });
       await client.connect();
       const me = await client.getMe();
-      await client.disconnect();
       ok(res, { session_name, ok: true, user_id: me.id, username: me.username || null });
     } catch (e) {
       const msg = String(e?.message || e);
       if (msg.includes("AUTH_KEY_UNREGISTERED")) return err(res, 401, "UNAUTHORIZED", "Session is invalid or revoked");
       if (msg.includes("FLOOD_WAIT")) return err(res, 429, "FLOOD_WAIT", msg);
       return err(res, 500, "INTERNAL", msg);
-    }
+    } finally { if (client) try { await client.disconnect(); } catch { } }
   });
 
   // --- summarize all sessions
@@ -200,16 +203,16 @@ export default function registerAccountManager(app) {
         try {
           const raw = JSON.parse(await fs.readFile(path.join(SESS_DIR, f), "utf8"));
           let status = "invalid", user_id = null, username = null;
+          let client = null;
           try {
-            const client = new TelegramClient(new StringSession(raw.session_string), Number(api_id), String(api_hash), { connectionRetries: 1 });
+            client = new TelegramClient(new StringSession(raw.session_string), Number(api_id), String(api_hash), { connectionRetries: 1 });
             await client.connect();
             const me = await client.getMe();
-            await client.disconnect();
             status = "ok"; user_id = me.id; username = me.username || null;
           } catch (e) {
             const msg = String(e?.message || e);
             if (msg.includes("AUTH_KEY_UNREGISTERED")) status = "revoked"; else status = "error";
-          }
+          } finally { if (client) try { await client.disconnect(); } catch { } }
           items.push({ name: raw.name, created_at: raw.created_at, status, user_id, username });
         } catch {
           items.push({ name: f.replace(/\.json$/, ""), created_at: null, status: "error", user_id: null, username: null });

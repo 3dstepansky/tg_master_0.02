@@ -52,7 +52,7 @@ app.post("/v1/groups/summary_legacy", guard, async (req, res) => {
       if (Array.isArray(pg)) usernames = pg;
       else if (typeof pg === "string") usernames = pg.split(/[\s,\n\r\t]+/).filter(Boolean);
     }
-    usernames = usernames.map(u => (u||"").toString().trim()).filter(Boolean).map(u => u.startsWith("@") ? u : ("@"+u));
+    usernames = usernames.map(u => (u || "").toString().trim()).filter(Boolean).map(u => u.startsWith("@") ? u : ("@" + u));
     if (!usernames.length) return err(res, 400, "BAD_REQUEST", "usernames (or Parsing_groups) is required");
 
     await ensureDirs();
@@ -67,61 +67,64 @@ app.post("/v1/groups/summary_legacy", guard, async (req, res) => {
         const files = (await fs.readdir(SESS_DIR)).filter(f => f.endsWith(".json"));
         if (files.length === 1) sessString = JSON.parse(await fs.readFile(path.join(SESS_DIR, files[0]), "utf8")).session_string;
       }
-    } catch {}
+    } catch { }
 
     if (!sessString) return err(res, 400, "BAD_REQUEST", "session_name is required (or keep exactly one saved session)");
 
     const client = new TelegramClient(new StringSession(sessString), Number(api_id), String(api_hash), { connectionRetries: 2 });
     await client.connect();
 
-    const items = [];
-    let okCount = 0, failCount = 0;
+    try {
+      const items = [];
+      let okCount = 0, failCount = 0;
 
-    for (const uname of usernames) {
-      const out = { username: uname, type: null, title: null, members_count: null, status: "not_found", linked_chat_username: null, online_count: null };
-      try {
-        const entity = await client.getEntity(uname).catch(() => null);
-        if (!entity) { items.push(out); failCount++; continue; }
-
-        // тип
-        let type = "group";
-        if (entity?.gigagroup || entity?.megagroup) type = "supergroup";
-        if (entity?.broadcast || entity?.__className?.includes("Channel")) type = "channel";
-        out.type = type; out.title = entity.title || entity.firstName || entity.username || uname;
-
-        // подробности
-        let linkedChatUsername = null; let membersCount = null; let status = "public";
+      for (const uname of usernames) {
+        const out = { username: uname, type: null, title: null, members_count: null, status: "not_found", linked_chat_username: null, online_count: null };
         try {
-          const input = await client.getInputEntity(entity);
-          const full = await client.invoke(new Api.channels.GetFullChannel({ channel: input }));
-          const fc = full?.fullChat;
-          membersCount = (fc?.participantsCount ?? fc?.subscribersCount ?? null);
-          if (typeof fc?.onlineCount === "number") out.online_count = fc.onlineCount;
-          if (full?.chats && fc?.linkedChatId) {
-            const linked = full.chats.find(c => String(c.id) === String(fc.linkedChatId));
-            linkedChatUsername = linked?.username ? ("@"+linked.username) : null;
-          }
-        } catch {
+          const entity = await client.getEntity(uname).catch(() => null);
+          if (!entity) { items.push(out); failCount++; continue; }
+
+          // тип
+          let type = "group";
+          if (entity?.gigagroup || entity?.megagroup) type = "supergroup";
+          if (entity?.broadcast || entity?.__className?.includes("Channel")) type = "channel";
+          out.type = type; out.title = entity.title || entity.firstName || entity.username || uname;
+
+          // подробности
+          let linkedChatUsername = null; let membersCount = null; let status = "public";
           try {
-            const chatId = entity?.id;
-            if (chatId) {
-              const full2 = await client.invoke(new Api.messages.GetFullChat({ chatId }));
-              const fc2 = full2?.fullChat;
-              membersCount = (fc2?.participantsCount ?? null);
+            const input = await client.getInputEntity(entity);
+            const full = await client.invoke(new Api.channels.GetFullChannel({ channel: input }));
+            const fc = full?.fullChat;
+            membersCount = (fc?.participantsCount ?? fc?.subscribersCount ?? null);
+            if (typeof fc?.onlineCount === "number") out.online_count = fc.onlineCount;
+            if (full?.chats && fc?.linkedChatId) {
+              const linked = full.chats.find(c => String(c.id) === String(fc.linkedChatId));
+              linkedChatUsername = linked?.username ? ("@" + linked.username) : null;
             }
-          } catch {}
-        }
+          } catch {
+            try {
+              const chatId = entity?.id;
+              if (chatId) {
+                const full2 = await client.invoke(new Api.messages.GetFullChat({ chatId }));
+                const fc2 = full2?.fullChat;
+                membersCount = (fc2?.participantsCount ?? null);
+              }
+            } catch { }
+          }
 
-        out.members_count = (typeof membersCount === "number" ? membersCount : null);
-        out.linked_chat_username = linkedChatUsername;
-        out.status = status;
+          out.members_count = (typeof membersCount === "number" ? membersCount : null);
+          out.linked_chat_username = linkedChatUsername;
+          out.status = status;
 
-        items.push(out); okCount++;
-      } catch { items.push(out); failCount++; }
+          items.push(out); okCount++;
+        } catch { items.push(out); failCount++; }
+      }
+
+      ok(res, { items }, { processed: items.length, ok: okCount, failed: failCount, took_ms: Date.now() - t0 });
+    } finally {
+      await client.disconnect();
     }
-
-    await client.disconnect();
-    ok(res, { items }, { processed: items.length, ok: okCount, failed: failCount, took_ms: Date.now() - t0 });
   } catch (e) {
     const msg = String((e && e.message) || e);
     if (msg.includes("FLOOD_WAIT")) return err(res, 429, "FLOOD_WAIT", msg);
@@ -139,7 +142,7 @@ app.listen(PORT, () => console.log("tg-master auth listening on :" + PORT));
 app.use("/v1/groups/summary", (req, _res, next) => {
   try {
     const b = req.body || {};
-    const aliases = ["ParsingGroups","Parsing_groups","Parsing_grups","usernames"];
+    const aliases = ["ParsingGroups", "Parsing_groups", "Parsing_grups", "usernames"];
     let raw;
     for (const k of aliases) if (b[k] != null) { raw = b[k]; break; }
 
@@ -152,7 +155,7 @@ app.use("/v1/groups/summary", (req, _res, next) => {
     const listSrc = b.usernames ?? raw;
     if (typeof listSrc === "string") {
       const s = listSrc.trim();
-      if (s.startsWith("[") && s.endsWith("]")) { try { b.usernames = JSON.parse(s); } catch {} }
+      if (s.startsWith("[") && s.endsWith("]")) { try { b.usernames = JSON.parse(s); } catch { } }
       if (!Array.isArray(b.usernames)) b.usernames = s.split(/[,\s]+/g).filter(Boolean);
     } else if (Array.isArray(listSrc)) {
       b.usernames = listSrc;
@@ -167,7 +170,7 @@ app.use("/v1/groups/summary", (req, _res, next) => {
     }
 
     req.body = b;
-  } catch {}
+  } catch { }
   next();
 });
 
@@ -180,6 +183,6 @@ console.error = (...args) => {
   try {
     const msg = args.map(x => (x && x.stack) ? x.stack : String(x)).join(" ");
     if (msg.includes("telegram/client/updates.js") && msg.includes("TIMEOUT")) return;
-  } catch {}
+  } catch { }
   return __origCE(...args);
 };

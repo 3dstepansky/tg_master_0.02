@@ -41,7 +41,7 @@ async function toFull(client, chat) {
     if (chat.className === 'Chat') {
       return await client.invoke(new Api.messages.GetFullChat({ chatId: chat.id }));
     }
-  } catch (_e) {}
+  } catch (_e) { }
   return null;
 }
 
@@ -99,13 +99,14 @@ export default function registerConverter(app) {
   // POST /v1/converter/resolve
   router.post('/resolve', async (req, res) => {
     const t0 = Date.now();
+    let client = null;
     try {
       const { session_name, api_id, api_hash, username, title, invite } = req.body || {};
       if (!session_name) return res.status(400).json({ success: false, data: null, meta: null, error: { code: 'BAD_REQUEST', message: 'session_name required', details: null } });
       const id = api_id || process.env.TG_API_ID || process.env.API_ID || process.env.TELEGRAM_API_ID;
       const hash = api_hash || process.env.TG_API_HASH || process.env.API_HASH || process.env.TELEGRAM_API_HASH;
       if (!id || !hash) return res.status(400).json({ success: false, data: null, meta: null, error: { code: 'BAD_REQUEST', message: 'api_id and api_hash are required', details: null } });
-      const client = await makeClient({ sessionName: session_name, apiId: id, apiHash: hash });
+      client = await makeClient({ sessionName: session_name, apiId: id, apiHash: hash });
 
       const entity = await resolveEntity(client, { username, title, invite });
       if (!entity) return res.status(404).json({ success: false, data: null, meta: null, error: { code: 'NOT_FOUND', message: 'chat not found', details: null } });
@@ -118,19 +119,22 @@ export default function registerConverter(app) {
       const code = /FLOOD_WAIT/.test(message) ? 'FLOOD_WAIT' : 'INTERNAL';
       const status = code === 'FLOOD_WAIT' ? 429 : 500;
       return res.status(status).json({ success: false, data: null, meta: null, error: { code, message, details: null } });
+    } finally {
+      if (client) try { await client.disconnect(); } catch { }
     }
   });
 
   // POST /v1/converter/members
   router.post('/members', async (req, res) => {
     const t0 = Date.now();
+    let client = null;
     try {
       const { session_name, api_id, api_hash, username, title, invite, limit = 100, page_size = 200, offset = 0, pause_ms = 500 } = req.body || {};
       if (!session_name) return res.status(400).json({ success: false, data: null, meta: null, error: { code: 'BAD_REQUEST', message: 'session_name required', details: null } });
       const id = api_id || process.env.TG_API_ID || process.env.API_ID || process.env.TELEGRAM_API_ID;
       const hash = api_hash || process.env.TG_API_HASH || process.env.API_HASH || process.env.TELEGRAM_API_HASH;
       if (!id || !hash) return res.status(400).json({ success: false, data: null, meta: null, error: { code: 'BAD_REQUEST', message: 'api_id and api_hash are required', details: null } });
-      const client = await makeClient({ sessionName: session_name, apiId: id, apiHash: hash });
+      client = await makeClient({ sessionName: session_name, apiId: id, apiHash: hash });
 
       const entity = await resolveEntity(client, { username, title, invite });
       if (!entity) return res.status(404).json({ success: false, data: null, meta: null, error: { code: 'NOT_FOUND', message: 'chat not found', details: null } });
@@ -195,6 +199,8 @@ export default function registerConverter(app) {
       const code = /FLOOD_WAIT/.test(message) ? 'FLOOD_WAIT' : 'INTERNAL';
       const status = code === 'FLOOD_WAIT' ? 429 : 500;
       return res.status(status).json({ success: false, data: null, meta: null, error: { code, message, details: null } });
+    } finally {
+      if (client) try { await client.disconnect(); } catch { }
     }
   });
 
